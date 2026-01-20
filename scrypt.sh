@@ -1,80 +1,57 @@
 #!/bin/bash
 set -e
 
-echo "=== Создаём пользователя kali ==="
-sudo useradd -m -s /bin/bash kali || true
-echo 'kali:kali' | sudo chpasswd
-sudo usermod -aG sudo kali
-sudo chown -R kali:kali /home/kali
+KALI_USER="kali"
+KALI_PASS="kali"
+SSHD_CONFIG="/etc/ssh/sshd_config"
+SSHD_SNIPPET="/etc/ssh/sshd_config.d/99-kali-password.conf"
 
-echo "=== Делаем резервную копию старого sshd_config ==="
-sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%F_%T)
+echo "=== [1/6] Проверка прав ==="
+if [[ $EUID -ne 0 ]]; then
+  echo "Запусти скрипт от root (sudo)"
+  exit 1
+fi
 
-echo "=== Записываем новый конфиг SSH ==="
-sudo tee /etc/ssh/sshd_config > /dev/null <<'EOF'
-# ==========================
-# Основные настройки SSH
-# ==========================
+echo "=== [2/6] Создание пользователя kali ==="
+if ! id "$KALI_USER" &>/dev/null; then
+  useradd -m -s /bin/bash "$KALI_USER"
+  echo "$KALI_USER:$KALI_PASS" | chpasswd
+  usermod -aG sudo "$KALI_USER"
+else
+  echo "Пользователь kali уже существует"
+fi
 
-Port 22
-Protocol 2
-AddressFamily any
-ListenAddress 0.0.0.0
-ListenAddress ::
+echo "=== [3/6] Настройка домашней директории ==="
+mkdir -p /home/kali
+chown -R kali:kali /home/kali
+chmod 700 /home/kali
 
-# Разрешаем вход root только по ключам
-PermitRootLogin prohibit-password
+echo "=== [4/6] Настройка SSH (без перезаписи конфига) ==="
 
-# Не разрешаем пустые пароли
-PermitEmptyPasswords no
+# Проверяем поддержку sshd_config.d
+if grep -q "^Include /etc/ssh/sshd_config.d/\*.conf" "$SSHD_CONFIG"; then
+  echo "Используем sshd_config.d"
+else
+  echo "Include /etc/ssh/sshd_config.d/*.conf" >> "$SSHD_CONFIG"
+fi
 
-# Аутентификация по ключам
-PubkeyAuthentication yes
-AuthorizedKeysFile     .ssh/authorized_keys
+mkdir -p /etc/ssh/sshd_config.d
 
-# Используем PAM для паролей
-UsePAM yes
-ChallengeResponseAuthentication no
-
-# По умолчанию вход по паролю отключён
-PasswordAuthentication no
-
-# Не показываем баннер при входе
-Banner none
-
-# ==========================
-# Таймауты и безопасность
-# ==========================
-X11Forwarding no
-AllowTcpForwarding yes
-GatewayPorts yes
-ClientAliveInterval 120
-ClientAliveCountMax 3
-LoginGraceTime 30
-PermitUserEnvironment no
-AllowAgentForwarding yes
-
-# ==========================
-# SFTP подсистема
-# ==========================
-Subsystem sftp /usr/lib/openssh/sftp-server
-
-# ==========================
-# Разрешаем вход по паролю только пользователю kali
-# ==========================
+cat > "$SSHD_SNIPPET" <<'EOF'
+# Разрешаем вход по паролю ТОЛЬКО пользователю kali
 Match User kali
     PasswordAuthentication yes
 EOF
 
-echo "=== Проверяем конфигурацию SSH ==="
-sudo sshd -t
+chmod 600 "$SSHD_SNIPPET"
 
-echo "=== Перезапускаем SSH ==="
-sudo systemctl restart ssh
+echo "=== [5/6] Проверка конфигурации SSH ==="
+sshd -t
 
-echo "=== Проверяем статус службы ==="
-sudo systemctl status ssh --no-pager
+echo "=== [6/6] Применение настроек (reload) ==="
+systemctl reload ssh
 
-echo "=== Готово! ==="
-echo "Теперь можно подключаться:"
-echo "ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no kali@<IP_или_HOST>"
+echo "=== ГОТОВО ==="
+echo
+echo "Подключение по паролю:"
+echo "ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no kali@<IP>"
